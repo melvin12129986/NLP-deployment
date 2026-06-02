@@ -3,10 +3,16 @@ import re
 from collections import Counter
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+try:
+    import joblib
+except ImportError:
+    st.error("joblib not installed. Please install it with: pip install joblib")
+    st.stop()
+
 from nltk import pos_tag
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
