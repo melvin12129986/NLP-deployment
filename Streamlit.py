@@ -1,4 +1,5 @@
-﻿import re
+﻿import io
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -7,9 +8,17 @@ import streamlit as st
 
 
 @st.cache_data
-def load_dataset() -> pd.DataFrame:
-    csv_path = Path(__file__).resolve().parent / "Symptom2Disease.csv"
-    df = pd.read_csv(csv_path, header=None, names=["id", "disease", "symptoms"])
+def load_dataset_from_path(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, header=None, names=["id", "disease", "symptoms"])
+    df["disease"] = df["disease"].astype(str).str.strip()
+    df["symptoms"] = df["symptoms"].astype(str).str.strip()
+    return df
+
+
+@st.cache_data
+def load_dataset_from_bytes(file_bytes: bytes) -> pd.DataFrame:
+    buffer = io.BytesIO(file_bytes)
+    df = pd.read_csv(buffer, header=None, names=["id", "disease", "symptoms"])
     df["disease"] = df["disease"].astype(str).str.strip()
     df["symptoms"] = df["symptoms"].astype(str).str.strip()
     return df
@@ -49,20 +58,38 @@ def main() -> None:
         "Use the symptom matcher to compare your description with disease examples, or browse the known disease list from the dataset."
     )
 
-    df = load_dataset()
+    csv_path = Path(__file__).resolve().parent / "Symptom2Disease.csv"
+    uploaded_file = None
+    df = None
+
+    if not csv_path.exists():
+        st.error(
+            "The dataset file `Symptom2Disease.csv` is missing from the app folder."
+        )
+        uploaded_file = st.file_uploader(
+            "Upload Symptom2Disease.csv", type=["csv"], help="Upload the same dataset file used locally."
+        )
+        if uploaded_file is not None:
+            df = load_dataset_from_bytes(uploaded_file.getvalue())
+        else:
+            st.info(
+                "To use the app, upload the CSV file or add `Symptom2Disease.csv` to the same folder as Streamlit.py."
+            )
+            st.stop()
+    else:
+        df = load_dataset_from_path(str(csv_path))
+
     diseases = sorted(df["disease"].unique())
     total_samples = len(df)
     disease_counts = Counter(df["disease"]).most_common(3)
 
-    st.sidebar.title("Navigation")
-    st.sidebar.write("Choose a page and explore the dataset.")
-    page = st.sidebar.radio("Go to", ["Check Symptoms", "Known Diseases"])
-    st.sidebar.markdown("---")
     st.sidebar.markdown("### Dataset overview")
     st.sidebar.metric("Known diseases", len(diseases))
     st.sidebar.metric("Symptom examples", total_samples)
 
-    if page == "Check Symptoms":
+    tab1, tab2 = st.tabs(["🔍 Check Symptoms", "📋 Known Diseases"])
+
+    if tab1:
         st.subheader("Check your symptoms")
         st.markdown("Describe how you feel and the app will compare your text against known symptom examples.")
 
@@ -77,12 +104,9 @@ def main() -> None:
 
         with right:
             st.info("Tip: use words that describe your main symptoms clearly.")
-            st.write("### Fast facts")
+            st.write("### Quick Stats")
             st.write(f"- Known diseases: **{len(diseases)}**")
             st.write(f"- Total dataset examples: **{total_samples}**")
-            st.write("### Most frequent diseases")
-            for disease, count in disease_counts:
-                st.write(f"- **{disease}**: {count} examples")
 
         if submit:
             if not user_input.strip():
@@ -113,7 +137,7 @@ def main() -> None:
             "This app uses a simple text-overlap matcher on symptom descriptions from the dataset. It is a demo only and not medical advice."
         )
 
-    else:
+    with tab2:
         st.subheader("Known Diseases")
         st.markdown("Browse the disease classes the model knows from the dataset.")
 
