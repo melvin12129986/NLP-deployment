@@ -3,8 +3,13 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import joblib
+import numpy as np
 import pandas as pd
 import streamlit as st
+from nltk import pos_tag
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 
 
 @st.cache_data
@@ -24,31 +29,112 @@ def load_dataset_from_bytes(file_bytes: bytes) -> pd.DataFrame:
     return df
 
 
-def normalize_text(text: str) -> list[str]:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    tokens = [token for token in text.split() if len(token) > 1]
-    return tokens
+@st.cache_resource
+def load_svm_model_and_vectorizer(model_path: str, vectorizer_path: str):
+    """Load the SVM model and TF-IDF vectorizer."""
+    try:
+        svm_model = joblib.load(model_path)
+        vectorizer = joblib.load(vectorizer_path)
+        return svm_model, vectorizer
+    except FileNotFoundError as e:
+        st.error(f"Model files not found: {e}")
+        return None, None
 
 
-def score_disease(input_text: str, df: pd.DataFrame) -> list[tuple[str, int]]:
-    input_tokens = normalize_text(input_text)
-    if not input_tokens:
-        return []
+def get_wordnet_pos(treebank_tag):
+    """Map POS tags to WordNet POS tags."""
+    if treebank_tag.startswith('J'):
+        return 'a'  # adjective
+    elif treebank_tag.startswith('V'):
+        return 'v'  # verb
+    elif treebank_tag.startswith('N'):
+        return 'n'  # noun
+    elif treebank_tag.startswith('R'):
+        return 'r'  # adverb
+    else:
+        return 'n'  # default to noun
 
-    input_counter = Counter(input_tokens)
-    disease_scores: dict[str, int] = {}
 
-    for disease, group in df.groupby("disease"):
-        score = 0
-        for sample in group["symptoms"]:
-            sample_tokens = normalize_text(sample)
-            overlap = sum(min(input_counter[word], sample_tokens.count(word)) for word in set(sample_tokens))
-            score += overlap
-        disease_scores[disease] = score
+@st.cache_resource
+def get_text_cleaner():
+    """Initialize and cache text cleaning resources."""
+    try:
+        import nltk
+        nltk.download('stopwords', quiet=True)
+        nltk.download('wordnet', quiet=True)
+        nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+        stop_words = set(stopwords.words('english'))
+        stemmer = WordNetLemmatizer()
+        return stop_words, stemmer
+    except Exception as e:
+        st.error(f"Error loading NLTK resources: {e}")
+        return None, None
 
-    ranked = sorted(disease_scores.items(), key=lambda pair: pair[1], reverse=True)
-    return [(disease, score) for disease, score in ranked if score > 0]
+
+def clean_text(text: str, stop_words, stemmer) -> str:
+    """Clean and preprocess text."""
+    text = str(text).lower()
+    text = re.sub(r'http\S+|www\S+', ' ', text)
+
+    contractions = {
+        "i'm": "i am", "i've": "i have", "i'll": "i will", "i'd": "i would",
+        "you're": "you are", "you've": "you have", "you'll": "you will", "you'd": "you would",
+        "he's": "he is", "she's": "she is", "it's": "it is",
+        "we're": "we are", "we've": "we have", "we'll": "we will",
+        "they're": "they are", "they've": "they have", "they'll": "they will",
+        "that's": "that is", "there's": "there is",
+        "can't": "cannot", "won't": "will not", "don't": "do not", "didn't": "did not",
+        "isn't": "is not", "aren't": "are not", "wasn't": "was not", "weren't": "were not",
+        "shouldn't": "should not", "couldn't": "could not", "wouldn't": "would not",
+        "haven't": "have not", "hasn't": "has not", "hadn't": "had not"
+    }
+    for contraction, replacement in contractions.items():
+        text = re.sub(r'\b' + re.escape(contraction) + r'\b', replacement, text)
+
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    words = text.split()
+    words = [word for word in words if word not in stop_words]
+
+    tagged_words = pos_tag(words)
+    words = [stemmer.lemmatize(word, get_wordnet_pos(tag)) for word, tag in tagged_words]
+
+    return ' '.join(words)
+
+
+def predict_disease(input_text: str, svm_model, vectorizer, stop_words, stemmer, label_encoder):
+    """Predict disease using SVM model and return top 3 predictions."""
+    if not input_text.strip():
+        return None
+
+    cleaned_text = clean_text(input_text, stop_words, stemmer)
+    if not cleaned_text:
+        return None
+
+    try:
+        vectorized = vectorizer.transform([cleaned_text]).toarray()
+        prediction = svm_model.predict(vectorized)[0]
+        decision_scores = svm_model.decision_function(vectorized)[0]
+        
+        # Get top 3 predictions
+        top_3_indices = np.argsort(decision_scores)[::-1][:3]
+        classes = svm_model.classes_
+        
+        top_predictions = []
+        for idx in top_3_indices:
+            score = decision_scores[idx]
+            # Convert decision function to 0-1 probability using sigmoid
+            confidence = 1 / (1 + np.exp(-score))
+            top_predictions.append({
+                "disease": classes[idx],
+                "confidence": float(confidence)
+            })
+        
+        return top_predictions
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        return None
 
 
 def main() -> None:
@@ -59,6 +145,10 @@ def main() -> None:
     )
 
     csv_path = Path(__file__).resolve().parent / "Symptom2Disease.csv"
+    svm_model_path = Path(__file__).resolve().parent / "svm_model_tfidf.pkl"
+    vectorizer_path = Path(__file__).resolve().parent / "tfidf_vectorizer.pkl"
+    label_encoder_path = Path(__file__).resolve().parent / "label_encoder_normalize_reproducabled.pkl"
+
     uploaded_file = None
     df = None
 
@@ -79,9 +169,24 @@ def main() -> None:
     else:
         df = load_dataset_from_path(str(csv_path))
 
+    svm_model, vectorizer = load_svm_model_and_vectorizer(str(svm_model_path), str(vectorizer_path))
+    
+    if not svm_model or not vectorizer:
+        st.error("Failed to load the SVM model or vectorizer. Make sure they are saved in the same folder.")
+        st.stop()
+
+    try:
+        label_encoder = joblib.load(str(label_encoder_path))
+    except FileNotFoundError:
+        st.error(f"Label encoder not found at {label_encoder_path}")
+        st.stop()
+
+    stop_words, stemmer = get_text_cleaner()
+    if stop_words is None or stemmer is None:
+        st.stop()
+
     diseases = sorted(df["disease"].unique())
     total_samples = len(df)
-    disease_counts = Counter(df["disease"]).most_common(3)
 
     st.sidebar.markdown("### Dataset overview")
     st.sidebar.metric("Known diseases", len(diseases))
@@ -112,29 +217,40 @@ def main() -> None:
             if not user_input.strip():
                 st.warning("Please describe your symptoms before checking.")
             else:
-                with st.spinner("Matching your symptoms..."):
-                    predictions = score_disease(user_input, df)
+                with st.spinner("Analyzing symptoms with ML model..."):
+                    result = predict_disease(user_input, svm_model, vectorizer, stop_words, stemmer, label_encoder)
 
-                if not predictions:
+                if result is None:
                     st.error(
-                        "No strong match was found. Try using more detailed or different symptoms."
+                        "Could not process your input. Try using clearer symptom descriptions."
                     )
                 else:
-                    top_matches = predictions[:5]
-                    st.success("Possible disease matches")
-                    for disease, score in top_matches:
-                        st.markdown(f"**{disease}** — score: {score}")
+                    st.success("🎯 Top 3 Disease Predictions")
+                    
+                    for i, pred in enumerate(result, 1):
+                        disease = pred["disease"]
+                        confidence = pred["confidence"]
+                        
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**{i}. {disease}**")
+                            st.progress(confidence)
+                        with col2:
+                            st.metric("", f"{confidence * 100:.1f}%")
 
                     st.markdown("---")
-                    best_disease = top_matches[0][0]
-                    st.write(f"### Sample symptom descriptions for **{best_disease}**")
+                    best_disease = result[0]["disease"]
+                    st.write(f"### Sample symptoms for **{best_disease}**")
                     examples = df[df["disease"] == best_disease]["symptoms"].head(5).tolist()
-                    for example in examples:
-                        st.write(f"- {example}")
+                    if examples:
+                        for example in examples:
+                            st.write(f"- {example}")
+                    else:
+                        st.info(f"No examples found for {best_disease} in the dataset.")
 
         st.markdown("---")
         st.caption(
-            "This app uses a simple text-overlap matcher on symptom descriptions from the dataset. It is a demo only and not medical advice."
+            "This app uses a trained SVM model with TF-IDF vectorization to classify diseases from symptom descriptions. It is a demo only and not medical advice."
         )
 
     with tab2:
