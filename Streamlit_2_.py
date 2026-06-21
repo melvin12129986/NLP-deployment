@@ -54,7 +54,7 @@ div[data-testid="metric-container"] {
 }
 div[data-testid="metric-container"] label { font-size: 11px !important; letter-spacing: 0.06em; text-transform: uppercase; color: #000 !important; }
 div[data-testid="metric-container"] [data-testid="metric-value"] {
-    font-size: clamp(14px, 2.4vw, 22px) !important;
+    font-size: clamp(14px, 2.4vw, 16px) !important;
     font-weight: 600 !important;
     color: #000 !important;
     white-space: normal !important;
